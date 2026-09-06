@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>4-Point Color Interpolation Lab</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: #0b0d12; color: #e9edf5;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  body { padding: 24px; }
+  .app { max-width: 1450px; margin: auto; }
+  header { display:flex; justify-content:space-between; gap:20px; align-items:end; margin-bottom:18px; }
+  h1 { margin:0; font-size:22px; letter-spacing:-.02em; }
+  .sub { color:#8e98aa; font-size:13px; margin-top:5px; }
+  .layout { display:grid; grid-template-columns:minmax(0,1fr) 330px; gap:18px; }
+  .card { background:#11151d; border:1px solid #202632; border-radius:14px; overflow:hidden; }
+  .canvas-wrap { position:relative; aspect-ratio:16/10; min-height:420px; background:#05070a; }
+  canvas { width:100%; height:100%; display:block; }
+  .points { position:absolute; inset:0; pointer-events:none; }
+  .point { position:absolute; width:14px; height:14px; border-radius:50%; transform:translate(-50%,-50%);
+    border:2px solid white; box-shadow:0 0 0 1px #000,0 0 15px #000; }
+  .label { position:absolute; transform:translate(9px,-8px); font-size:11px; font-weight:700;
+    text-shadow:0 1px 4px #000, 0 0 8px #000; }
+  .legend { padding:13px 16px; display:flex; flex-wrap:wrap; gap:14px; border-top:1px solid #202632; color:#aab3c2; font-size:12px; }
+  .swatch { width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:6px; }
+  .panel { padding:18px; }
+  .method { display:grid; gap:8px; margin-bottom:20px; }
+  button { border:1px solid #2b3443; background:#171c25; color:#dfe5ee; border-radius:9px; padding:10px 11px;
+    cursor:pointer; text-align:left; font-size:13px; }
+  button:hover { background:#1c2330; }
+  button.active { border-color:#8794aa; background:#222a37; }
+  .control { margin:16px 0; }
+  .control-head { display:flex; justify-content:space-between; font-size:12px; color:#aab3c2; margin-bottom:8px; }
+  input[type=range] { width:100%; accent-color:#aeb8c8; }
+  .hint { color:#737e90; font-size:11px; line-height:1.5; margin-top:18px; }
+  code { color:#cdd5e2; }
+  @media(max-width:900px) { .layout{grid-template-columns:1fr} .canvas-wrap{min-height:300px} }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div>
+      <h1>4-Point Color Interpolation Lab</h1>
+      <div class="sub">Same control points · same colors · different weighting functions</div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <section class="card">
+      <div class="canvas-wrap">
+        <canvas id="gl"></canvas>
+        <div class="points" id="points"></div>
+      </div>
+      <div class="legend" id="legend"></div>
+    </section>
+
+    <aside class="card panel">
+      <div class="method">
+        <button data-method="rbf" class="active">Gaussian RBF</button>
+        <button data-method="idw">IDW / Shepard</button>
+        <button data-method="smooth">IDW + smoothstep</button>
+        <button data-method="animated">Animated RBF + noise</button>
+      </div>
+
+      <div class="control">
+        <div class="control-head"><span>Sigma</span><span id="sigmaValue">0.250</span></div>
+        <input id="sigma" type="range" min=".03" max=".8" step=".005" value=".25">
+      </div>
+
+      <div class="control">
+        <div class="control-head"><span>Power</span><span id="powerValue">2.00</span></div>
+        <input id="power" type="range" min=".25" max="8" step=".05" value="2">
+      </div>
+
+      <div class="control">
+        <div class="control-head"><span>Radius</span><span id="radiusValue">0.450</span></div>
+        <input id="radius" type="range" min=".05" max="1" step=".005" value=".45">
+      </div>
+
+      <div class="control">
+        <div class="control-head"><span>Noise amount</span><span id="noiseValue">0.080</span></div>
+        <input id="noise" type="range" min="0" max=".35" step=".005" value=".08">
+      </div>
+
+      <div class="control">
+        <div class="control-head"><span>Animation speed</span><span id="speedValue">0.350</span></div>
+        <input id="speed" type="range" min="0" max="1.5" step=".01" value=".35">
+      </div>
+
+      <div class="hint">
+        The shader always blends the four supplied colors. In animated mode the
+        control points move slightly and a procedural value-noise field perturbs
+        the effective distance, producing a softer “living wallpaper” look.
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script>
+const colorValues = [
+  [254,196,150],
+  [221,108,185],
+  [150,47,191],
+  [79,91,213]
+];
+
+const keyPoints = [
+  [0.265,0.582],
+  [0.176,0.918],
+  [1-0.585,1-0.164],
+  [0.644,0.755],
+  [1-0.265,1-0.582],
+  [1-0.176,1-0.918],
+  [0.585,0.164],
+  [1-0.644,1-0.755]
+];
+
+// The supplied list contains 8 points: 4 original points and their mirrored
+// counterparts. The four colors are assigned to the first four points.
+const basePoints = keyPoints.slice(0, 4);
+const colors = colorValues.map(c => c.map(v => v / 255));
+
+const canvas = document.getElementById('gl');
+const gl = canvas.getContext('webgl', { antialias: false, alpha: false });
+if (!gl) throw new Error('WebGL is not supported');
+
+const vertexSource = `
+attribute vec2 a_position;
+varying vec2 v_uv;
+void main() {
+  v_uv = a_position * 0.5 + 0.5;
+  gl_Position = vec4(a_position, 0.0, 1.0);
+}`;
+
+const fragmentSource = `
+precision highp float;
+
+varying vec2 v_uv;
+
+uniform vec2 u_resolution;
+uniform float u_time;
+uniform int u_method;
+
+uniform vec3 u_color1;
+uniform vec3 u_color2;
+uniform vec3 u_color3;
+uniform vec3 u_color4;
+
+uniform vec2 u_pos1;
+uniform vec2 u_pos2;
+uniform vec2 u_pos3;
+uniform vec2 u_pos4;
+
+uniform float u_sigma;
+uniform float u_power;
+uniform float u_radius;
+uniform float u_noiseAmount;
+
+float hash21(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+
+float noise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+
+  float a = hash21(i);
+  float b = hash21(i + vec2(1.0, 0.0));
+  float c = hash21(i + vec2(0.0, 1.0));
+  float d = hash21(i + vec2(1.0, 1.0));
+
+  return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);
+}
+
+vec3 gaussianRBF(vec2 p) {
+  float s2 = 2.0 * u_sigma * u_sigma;
+
+  float d1 = distance(p, u_pos1);
+  float d2 = distance(p, u_pos2);
+  float d3 = distance(p, u_pos3);
+  float d4 = distance(p, u_pos4);
+
+  float w1 = exp(-(d1*d1) / s2);
+  float w2 = exp(-(d2*d2) / s2);
+  float w3 = exp(-(d3*d3) / s2);
+  float w4 = exp(-(d4*d4) / s2);
+
+  float total = w1+w2+w3+w4;
+
+  return (u_color1*w1 + u_color2*w2 +
+          u_color3*w3 + u_color4*w4) / total;
+}
+
+vec3 idw(vec2 p) {
+  float eps = 0.0005;
+
+  float d1 = distance(p, u_pos1);
+  float d2 = distance(p, u_pos2);
+  float d3 = distance(p, u_pos3);
+  float d4 = distance(p, u_pos4);
+
+  float w1 = 1.0 / pow(d1 + eps, u_power);
+  float w2 = 1.0 / pow(d2 + eps, u_power);
+  float w3 = 1.0 / pow(d3 + eps, u_power);
+  float w4 = 1.0 / pow(d4 + eps, u_power);
+
+  float total = w1+w2+w3+w4;
+
+  return (u_color1*w1 + u_color2*w2 +
+          u_color3*w3 + u_color4*w4) / total;
+}
+
+vec3 idwSmooth(vec2 p) {
+  float d1 = distance(p, u_pos1);
+  float d2 = distance(p, u_pos2);
+  float d3 = distance(p, u_pos3);
+  float d4 = distance(p, u_pos4);
+
+  // Smooth compact radial influence, then normalize.
+  float w1 = 1.0 - smoothstep(0.0, u_radius, d1);
+  float w2 = 1.0 - smoothstep(0.0, u_radius, d2);
+  float w3 = 1.0 - smoothstep(0.0, u_radius, d3);
+  float w4 = 1.0 - smoothstep(0.0, u_radius, d4);
+
+  float total = w1+w2+w3+w4;
+
+  // Fallback near regions outside every radius.
+  if (total < 0.0001) return idw(p);
+
+  return (u_color1*w1 + u_color2*w2 +
+          u_color3*w3 + u_color4*w4) / total;
+}
+
+vec3 animatedRBF(vec2 p) {
+  vec2 q = p;
+
+  // Small independent orbital motion around the original control points.
+  vec2 p1 = u_pos1 + vec2(
+    sin(u_time*0.73)*0.035,
+    cos(u_time*0.61)*0.030
+  );
+  vec2 p2 = u_pos2 + vec2(
+    cos(u_time*0.49)*0.030,
+    sin(u_time*0.83)*0.040
+  );
+  vec2 p3 = u_pos3 + vec2(
+    sin(u_time*0.57+1.4)*0.040,
+    cos(u_time*0.71+0.7)*0.030
+  );
+  vec2 p4 = u_pos4 + vec2(
+    cos(u_time*0.67+2.1)*0.035,
+    sin(u_time*0.53+1.2)*0.035
+  );
+
+  // Domain warp makes the gradient less mechanically radial.
+  float n1 = noise(q * 3.0 + u_time * 0.035);
+  float n2 = noise(q * 6.0 - u_time * 0.025);
+  vec2 warp = vec2(n1 - 0.5, n2 - 0.5) * u_noiseAmount;
+  q += warp;
+
+  float s2 = 2.0 * u_sigma * u_sigma;
+
+  float d1 = distance(q, p1);
+  float d2 = distance(q, p2);
+  float d3 = distance(q, p3);
+  float d4 = distance(q, p4);
+
+  // A second low-frequency noise term modulates influence subtly.
+  float modulation = 1.0 + (noise(q * 4.0 + u_time * 0.05)-0.5)
+                           * u_noiseAmount * 1.7;
+
+  float w1 = exp(-(d1*d1) / s2) * modulation;
+  float w2 = exp(-(d2*d2) / s2) * modulation;
+  float w3 = exp(-(d3*d3) / s2) * modulation;
+  float w4 = exp(-(d4*d4) / s2) * modulation;
+
+  float total = w1+w2+w3+w4;
+
+  vec3 color = (u_color1*w1 + u_color2*w2 +
+                u_color3*w3 + u_color4*w4) / total;
+
+  // Tiny luminance variation prevents the result from looking like
+  // a perfectly static mathematical gradient.
+  float grain = noise(q * 10.0 + u_time * 0.12) - 0.5;
+  color += grain * u_noiseAmount * 0.10;
+
+  return clamp(color, 0.0, 1.0);
+}
+
+void main() {
+  vec3 color;
+
+  if (u_method == 0)
+    color = gaussianRBF(v_uv);
+  else if (u_method == 1)
+    color = idw(v_uv);
+  else if (u_method == 2)
+    color = idwSmooth(v_uv);
+  else
+    color = animatedRBF(v_uv);
+
+  gl_FragColor = vec4(color, 1.0);
+}`;
+
+function compile(type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS))
+    throw new Error(gl.getShaderInfoLog(shader));
+  return shader;
+}
+
+const program = gl.createProgram();
+gl.attachShader(program, compile(gl.VERTEX_SHADER, vertexSource));
+gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragmentSource));
+gl.linkProgram(program);
+if (!gl.getProgramParameter(program, gl.LINK_STATUS))
+  throw new Error(gl.getProgramInfoLog(program));
+gl.useProgram(program);
+
+const buffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+  -1,-1, 1,-1, -1,1,
+  -1,1, 1,-1, 1,1
+]), gl.STATIC_DRAW);
+
+const positionLocation = gl.getAttribLocation(program, 'a_position');
+gl.enableVertexAttribArray(positionLocation);
+gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+
+const loc = name => gl.getUniformLocation(program, name);
+
+const U = {
+  resolution: loc('u_resolution'),
+  time: loc('u_time'),
+  method: loc('u_method'),
+  sigma: loc('u_sigma'),
+  power: loc('u_power'),
+  radius: loc('u_radius'),
+  noise: loc('u_noiseAmount'),
+  colors: [loc('u_color1'),loc('u_color2'),loc('u_color3'),loc('u_color4')],
+  positions: [loc('u_pos1'),loc('u_pos2'),loc('u_pos3'),loc('u_pos4')]
+};
+
+let method = 0;
+const params = {
+  sigma: .25,
+  power: 2,
+  radius: .45,
+  noise: .08,
+  speed: .35
+};
+
+function resize() {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.round(rect.width*dpr));
+  canvas.height = Math.max(1, Math.round(rect.height*dpr));
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+
+addEventListener('resize', resize);
+resize();
+
+U.colors.forEach((u, i) => gl.uniform3fv(u, colors[i]));
+U.positions.forEach((u, i) => gl.uniform2fv(u, basePoints[i]));
+
+function updatePoints(t) {
+  const p = basePoints.map(p => [p[0],p[1]]);
+
+  if (method === 3) {
+    p[0][0] += Math.sin(t*.73)*.035;
+    p[0][1] += Math.cos(t*.61)*.030;
+    p[1][0] += Math.cos(t*.49)*.030;
+    p[1][1] += Math.sin(t*.83)*.040;
+    p[2][0] += Math.sin(t*.57+1.4)*.040;
+    p[2][1] += Math.cos(t*.71+.7)*.030;
+    p[3][0] += Math.cos(t*.67+2.1)*.035;
+    p[3][1] += Math.sin(t*.53+1.2)*.035;
+  }
+
+  U.positions.forEach((u,i) => gl.uniform2fv(u,p[i]));
+  renderPointMarkers(p);
+}
+
+function renderPointMarkers(points) {
+  const root = document.getElementById('points');
+  root.innerHTML = '';
+  points.forEach((p,i) => {
+    const el = document.createElement('div');
+    el.className = 'point';
+    el.style.left = (p[0]*100)+'%';
+    el.style.top = ((1-p[1])*100)+'%';
+    el.style.background =
+      `rgb(${colorValues[i][0]},${colorValues[i][1]},${colorValues[i][2]})`;
+    const label = document.createElement('span');
+    label.className = 'label';
+    label.textContent = 'C'+(i+1);
+    el.appendChild(label);
+    root.appendChild(el);
+  });
+}
+
+function renderLegend() {
+  const root = document.getElementById('legend');
+  root.innerHTML = colorValues.map((c,i) =>
+    `<span><i class="swatch" style="background:rgb(${c.join(',')})"></i>C${i+1} ${c.join(', ')}</span>`
+  ).join('');
+}
+renderLegend();
+
+document.querySelectorAll('[data-method]').forEach((button, i) => {
+  button.addEventListener('click', () => {
+    method = i;
+    document.querySelectorAll('[data-method]').forEach(b => b.classList.remove('active'));
+    button.classList.add('active');
+  });
+});
+
+function bindRange(id, key, digits) {
+  const input = document.getElementById(id);
+  const output = document.getElementById(id+'Value');
+  input.addEventListener('input', () => {
+    params[key] = Number(input.value);
+    output.textContent = params[key].toFixed(digits);
+  });
+}
+bindRange('sigma','sigma',3);
+bindRange('power','power',2);
+bindRange('radius','radius',3);
+bindRange('noise','noise',3);
+bindRange('speed','speed',3);
+
+let start = performance.now();
+
+function frame(now) {
+  const t = (now-start)/1000 * params.speed;
+
+  gl.useProgram(program);
+  gl.uniform2f(U.resolution, canvas.width, canvas.height);
+  gl.uniform1f(U.time, t);
+  gl.uniform1i(U.method, method);
+  gl.uniform1f(U.sigma, params.sigma);
+  gl.uniform1f(U.power, params.power);
+  gl.uniform1f(U.radius, params.radius);
+  gl.uniform1f(U.noise, params.noise);
+
+  updatePoints(t);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
