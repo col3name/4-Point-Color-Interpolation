@@ -1,4 +1,5 @@
-Color Interpolation in WebGL
+# Color Interpolation in WebGL
+
 WebGL-based color interpolation playground to compare several distance-based interpolation methods:
 
 ![preview.png](preview.png)
